@@ -5,11 +5,13 @@ import (
 
 	"github.com/SendHive/worker-service/external"
 	"github.com/SendHive/worker-service/models"
+	"github.com/google/uuid"
 )
 
 type IJob interface {
 	Create(value *models.DBJobDetails) error
 	FindBy(conditions *models.DBJobDetails) (*models.DBJobDetails, error)
+	UpdateStatus(id uuid.UUID) error
 }
 
 type Job struct{}
@@ -53,4 +55,23 @@ func (j *Job) FindBy(conditions *models.DBJobDetails) (*models.DBJobDetails, err
 		return nil, ferr.Error
 	}
 	return resp, nil
+}
+
+func (j *Job) UpdateStatus(id uuid.UUID) error {
+	dbConn, err := external.GetDbConn()
+	if err != nil {
+		return err
+	}
+	transaction := dbConn.Begin()
+	if transaction.Error != nil {
+		return transaction.Error
+	}
+	defer transaction.Rollback()
+	update := transaction.Model(models.DBJobDetails{}).Where("task_id = ?", id).Update("status", "IN_PROGRESS")
+	if update.Error != nil {
+		log.Println("error whhile ")
+		return err
+	}
+	transaction.Commit()
+	return nil
 }
