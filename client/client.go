@@ -1,4 +1,4 @@
-package client // Change from `package main`
+package client 
 
 import (
 	"log"

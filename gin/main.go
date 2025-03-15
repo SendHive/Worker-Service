@@ -5,20 +5,21 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/SendHive/worker-service/client"
 	pb "github.com/SendHive/worker-service/proto"
 	"github.com/gin-gonic/gin"
 )
 
-var grpcClient pb.TaskServiceClient
-
 func getJobStatusHandler(c *gin.Context) {
 	jobID := c.Param("jobId")
+	Iclient := client.InitClient()
 
-	// Call gRPC streaming method
-	stream, err := grpcClient.GetJobStatus(context.Background(), &pb.GetJobStatusRequest{JobId: jobID})
+	stream, err := Iclient.GetJobStatus(context.Background(), &pb.GetJobStatusRequest{
+		JobId: jobID,
+	})
+
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start job status stream"})
-		return
+		c.JSON(http.StatusInternalServerError, gin.H{"Message":"error while getting the grpc client: "+err.Error()})
 	}
 
 	// Set up SSE (Server-Sent Events) for streaming HTTP response
@@ -39,14 +40,14 @@ func getJobStatusHandler(c *gin.Context) {
 			break
 		}
 	}
+	c.JSON(http.StatusOK, gin.H{"Message":"Status Completed"})
 }
 
 func main() {
 	r := gin.Default()
-
-	// Define API endpoint
+	r.GET("/health", func(ctx *gin.Context) {
+		ctx.JSON(200, gin.H{"Message":"GIN WORKING SUCCESSFULLY"})
+	})
 	r.GET("/job/:jobId/status", getJobStatusHandler)
-
-	// Start the API server
 	r.Run(":8080")
 }

@@ -96,10 +96,12 @@ func (s *Server) GetJobStatus(in *pb.GetJobStatusRequest, strem grpc.ServerStrea
 		}
 	}
 
+	jobId := uuid.MustParse(in.JobId)
+
 	// pushing message to the stream
 	for {
 		resp, err := s.JobRepo.FindBy(&models.DBJobDetails{
-			TaskId: uuid.MustParse(in.JobId),
+			TaskId: jobId,
 		})
 		if err != nil {
 			return &models.ServiceResponse{}
