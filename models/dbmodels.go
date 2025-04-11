@@ -81,3 +81,19 @@ func (*DBSecretsDetails) BeforeCreate(tx *gorm.DB) error {
 	tx.Statement.SetColumn("Id", uuid)
 	return nil
 }
+
+type DbFileDetails struct {
+	Id     uuid.UUID `gorm:"primaryKey,column:id"`
+	Name   string    `gorm:"column:name;not null"`
+	UserId uuid.UUID `gorm:"column:user_id;not null"`
+}
+
+func (DbFileDetails) TableName() string {
+	return "file_tbl"
+}
+
+func (*DbFileDetails) BeforeCreate(tx *gorm.DB) error {
+	uuid := uuid.New().String()
+	tx.Statement.SetColumn("Id", uuid)
+	return nil
+}

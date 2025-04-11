@@ -3,11 +3,14 @@ package job
 //Comman function file
 
 import (
+	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"log"
 	"time"
 
 	"github.com/SendHive/worker-service/models"
+	"github.com/minio/minio-go/v7"
 )
 
 func (j *JobService) ConsumeMessage() (*models.QueueResponse, error) {
@@ -77,4 +80,22 @@ func processMessage(req []byte) (*models.QueueResponse, error) {
 	time.Sleep(10 * time.Second)
 	log.Println("the process: ", res)
 	return &res, nil
+}
+
+func ReadCSV(obj *minio.Object) (rec []string, err error)  {
+	csvReader := csv.NewReader(obj)
+	records, err := csvReader.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse CSV: %v", err)
+	}
+	if len(records) == 0 {
+		return []string{}, nil
+	}	
+	result := []string{}
+	// Process each record
+	for _, record := range records[1:] {
+		row := record
+		result = append(result, row...)
+	}
+	return result, nil
 }

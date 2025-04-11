@@ -7,148 +7,245 @@ import (
 	"net"
 	"time"
 
+	minioDb "github.com/SendHive/Infra-Common/minio"
 	"github.com/SendHive/worker-service/dal"
 	"github.com/SendHive/worker-service/external"
 	"github.com/SendHive/worker-service/job"
 	"github.com/SendHive/worker-service/models"
 	pb "github.com/SendHive/worker-service/proto"
 	"github.com/google/uuid"
+	"github.com/minio/minio-go/v7"
 	"google.golang.org/grpc"
-	"gorm.io/gorm"
 )
 
-type Server struct {
+// Server dependencies
+type ServerDependencies struct {
+	JobRepo      dal.IJob
+	SmtpRepo     dal.ISmtpDal
+	FileRepo     dal.IFile
+	UserRepo     dal.IUser
+	MinioClient  *minio.Client
+	MinioService minioDb.IMinioService
+}
+
+// GRPC Server implementation
+type TaskServer struct {
 	pb.UnimplementedTaskServiceServer
-	JobRepo  dal.IJob
-	SmtpRepo dal.ISmtpDal
-	Job      job.IJobService
+	deps ServerDependencies
 }
 
-func IntilizeDataBase() *gorm.DB {
-	dbConn, err := external.GetDbConn()
-	if err != nil {
-		log.Println("error while connecting to the database: ", err)
-		return nil
-	}
-	fmt.Println(dbConn)
-	return dbConn
+func NewTaskServer(deps ServerDependencies) *TaskServer {
+	return &TaskServer{deps: deps}
 }
 
-func (s *Server) HealthCheck(ctx context.Context, in *pb.NoParams) (*pb.HealthCheckResponse, error) {
-	return &pb.HealthCheckResponse{
-		Status: "Connection Successfull",
-	}, nil
+// HealthCheck implements a simple health check endpoint
+func (s *TaskServer) HealthCheck(ctx context.Context, _ *pb.NoParams) (*pb.HealthCheckResponse, error) {
+	return &pb.HealthCheckResponse{Status: "Connection Successful"}, nil
 }
 
-func (s *Server) StartJob(ctx context.Context, in *pb.StartJobRequest) (*pb.StartJobResponse, error) {
-	if in.JobId == "" || in.JobName == "" {
-		return nil, &models.ServiceResponse{
-			Code:    404,
-			Message: "Name or id is messing in the grpc request",
-			Data:    nil,
-		}
+// StartJob handles job initiation
+func (s *TaskServer) StartJob(ctx context.Context, req *pb.StartJobRequest) (*pb.StartJobResponse, error) {
+	if err := validateStartJobRequest(req); err != nil {
+		return nil, err
 	}
 
-	fmt.Println(" the requestId: ", in.JobId)
-
-	Jresp, err := s.JobRepo.FindBy(&models.DBJobDetails{
-		TaskId: uuid.MustParse(in.JobId),
-	})
+	jobDetails, err := s.getJobDetails(req.JobId)
 	if err != nil {
-		return nil, &models.ServiceResponse{
-			Code:    500,
-			Message: "error while finding the task service: " + err.Error(),
-		}
+		return nil, err
 	}
 
-	log.Println("The details of job with this id: ", Jresp)
+	log.Println("the taskId: ", jobDetails.TaskId)
 
-	//Updating the JobStatus
-	err = s.JobRepo.UpdateStatus(Jresp.TaskId)
-	if err != nil {
-		return nil, &models.ServiceResponse{
-			Code:    500,
-			Message: "error while updating the task service: " + err.Error(),
-		}
+	if err := s.updateJobStatus(jobDetails.TaskId, "IN_PROGRESS"); err != nil {
+		return nil, err
 	}
 
-	// SMTP Sending email
-	resp, err := s.SmtpRepo.FindBy(&models.DBSMTPDetails{
-		UserId: Jresp.UserId,
-	})
-	if err != nil {
-		return nil, &models.ServiceResponse{
-			Code:    500,
-			Message: "error while updating the task service: " + err.Error(),
-		}
+	if err := s.processJob(jobDetails); err != nil {
+		return nil, err
 	}
-	log.Println("The smtp details: ", resp)
-	return &pb.StartJobResponse{
-		Status: "IN_PROGRESS",
-	}, nil
+
+	return &pb.StartJobResponse{Status: "IN_PROGRESS"}, nil
 }
 
-func (s *Server) GetJobStatus(in *pb.GetJobStatusRequest, strem grpc.ServerStreamingServer[pb.GetJobStatusResponse]) error {
-	if in.JobId == "" {
+// GetJobStatus streams job status updates
+func (s *TaskServer) GetJobStatus(req *pb.GetJobStatusRequest, stream pb.TaskService_GetJobStatusServer) error {
+	if req.JobId == "" {
 		return &models.ServiceResponse{
 			Code:    404,
-			Message: "Bad Request",
+			Message: "Job ID is required",
 		}
 	}
 
-	jobId := uuid.MustParse(in.JobId)
+	jobID := uuid.MustParse(req.JobId)
+	return s.streamJobStatus(stream, jobID)
+}
 
-	// pushing message to the stream
-	for {
-		resp, err := s.JobRepo.FindBy(&models.DBJobDetails{
-			TaskId: jobId,
-		})
-		if err != nil {
-			return &models.ServiceResponse{}
+// Helper methods
+func validateStartJobRequest(req *pb.StartJobRequest) error {
+	if req.JobId == "" || req.JobName == "" {
+		return &models.ServiceResponse{
+			Code:    504,
+			Message: "Request Body should have the name and jobId",
 		}
-		err = strem.Send(&pb.GetJobStatusResponse{
-			Status: resp.Status,
-		})
-		if err != nil {
-			log.Printf("Error sending stream: %v", err)
-			return err
-		}
-
-		if resp.Status == "COMPLETED" {
-			log.Printf("Job %s completed, stopping stream.", in.JobId)
-			break
-		}
-
-		time.Sleep(2 * time.Second)
 	}
-
 	return nil
 }
 
+func (s *TaskServer) getJobDetails(jobID string) (*models.DBJobDetails, error) {
+	jobDetails, err := s.deps.JobRepo.FindBy(&models.DBJobDetails{
+		TaskId: uuid.MustParse(jobID),
+	})
+	if err != nil {
+		return nil, &models.ServiceResponse{
+			Code:    500,
+			Message: "error whie finding the the job details: " + err.Error(),
+		}
+	}
+	return jobDetails, nil
+}
+
+func (s *TaskServer) updateJobStatus(jobID uuid.UUID, status string) error {
+	if err := s.deps.JobRepo.UpdateStatus(jobID, status); err != nil {
+		return &models.ServiceResponse{
+			Code:    500,
+			Message: "error whie updating the job details: " + err.Error(),
+		}
+	}
+	return nil
+}
+
+func (s *TaskServer) processJob(jobDetails *models.DBJobDetails) error {
+	userDetails, err := s.deps.UserRepo.FindByConditions(&models.DBUserDetails{
+		UserId: jobDetails.UserId,
+	})
+	if err != nil {
+		return &models.ServiceResponse{
+			Code:    500,
+			Message: "error whie finding the the user details: " + err.Error(),
+		}
+	}
+
+	fileDetails, err := s.deps.FileRepo.FindBy(&models.DbFileDetails{
+		Name: jobDetails.ObjectName,
+	})
+	if err != nil {
+		return &models.ServiceResponse{
+			Code:    500,
+			Message: "error whie finding the the file details: " + err.Error(),
+		}
+	}
+
+	obj, err := external.GetObject(s.deps.MinioClient, s.deps.MinioService, userDetails.Name, fileDetails.Name)
+	if err != nil {
+		return err
+	}
+
+	rec, err := job.ReadCSV(obj)
+	if err != nil {
+		return &models.ServiceResponse{
+			Code:    500,
+			Message: "error whie reading the csv: " + err.Error(),
+		}
+	}
+
+	log.Println("the records: ", rec)
+
+	smtpDetails, err := s.deps.SmtpRepo.FindBy(&models.DBSMTPDetails{
+		UserId: jobDetails.UserId,
+	})
+	if err != nil {
+		return &models.ServiceResponse{
+			Code:    500,
+			Message: "error whie finding the the smtp details: " + err.Error(),
+		}
+	}
+
+	log.Printf("SMTP details found: %+v", smtpDetails)
+	return nil
+}
+
+func (s *TaskServer) streamJobStatus(stream pb.TaskService_GetJobStatusServer, jobID uuid.UUID) error {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-stream.Context().Done():
+			return nil
+		case <-ticker.C:
+			jobDetails, err := s.deps.JobRepo.FindBy(&models.DBJobDetails{TaskId: jobID})
+			if err != nil {
+				return err
+			}
+
+			if err := stream.Send(&pb.GetJobStatusResponse{Status: jobDetails.Status}); err != nil {
+				log.Printf("Error sending status update: %v", err)
+				return err
+			}
+
+			if jobDetails.Status == "COMPLETED" {
+				log.Printf("Job %s completed", jobID)
+				return nil
+			}
+		}
+	}
+}
+
+// Initialization and main
+func initializeDependencies() (*ServerDependencies, error) {
+	jobRepo, err := dal.NewJobDalRequest()
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize job DAL: %w", err)
+	}
+
+	smtpRepo, err := dal.NewSmtpDalRequest()
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize SMTP DAL: %w", err)
+	}
+
+	fileRepo, err := dal.NewFileDalRequest()
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize file DAL: %w", err)
+	}
+
+	userRepo, err := dal.NewUserDalRequest()
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize user DAL: %w", err)
+	}
+
+	minioClient, minioService, err := external.ConnectMinio()
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to MinIO: %w", err)
+	}
+
+	return &ServerDependencies{
+		JobRepo:      jobRepo,
+		SmtpRepo:     smtpRepo,
+		FileRepo:     fileRepo,
+		UserRepo:     userRepo,
+		MinioClient:  minioClient,
+		MinioService: minioService,
+	}, nil
+}
+
 func main() {
-	var ser Server
-	// Connect to the Job Dal
-	IJob, err := dal.NewJobDalRequest()
+	deps, err := initializeDependencies()
 	if err != nil {
-		log.Println("error while connecting to dal(job): ", err)
-		return
+		log.Fatalf("Failed to initialize dependencies: %v", err)
 	}
 
-	// Connect to the SMTP Dal
-	ISmtp, err := dal.NewSmtpDalRequest()
+	server := NewTaskServer(*deps)
+
+	lis, err := net.Listen("tcp", ":3000")
 	if err != nil {
-		log.Println("error while connecting to dal(smtp): ", err)
-		return
+		log.Fatalf("failed to listen: %v", err)
 	}
 
-	conn, err := net.Listen("tcp", ":3000")
-	if err != nil {
-		log.Fatal("error while starting the GRPC server: ", err)
-	}
-	s := grpc.NewServer()
-	ser.JobRepo = IJob
-	ser.SmtpRepo = ISmtp
-	pb.RegisterTaskServiceServer(s, &ser)
+	grpcServer := grpc.NewServer()
+	pb.RegisterTaskServiceServer(grpcServer, server)
+
 	log.Println("Server running at port 3000")
-	s.Serve(conn)
+	if err := grpcServer.Serve(lis); err != nil {
+		log.Fatalf("failed to serve: %v", err)
+	}
 }

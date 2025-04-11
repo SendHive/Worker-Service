@@ -5,22 +5,23 @@ import (
 
 	"github.com/SendHive/worker-service/external"
 	"github.com/SendHive/worker-service/models"
+
 	"github.com/google/uuid"
 )
 
-type IJob interface {
-	Create(value *models.DBJobDetails) error
-	FindBy(conditions *models.DBJobDetails) (*models.DBJobDetails, error)
-	UpdateStatus(id uuid.UUID, status string) error
+type IFile interface {
+	Create(value *models.DbFileDetails) error
+	FindBy(conditions *models.DbFileDetails) (*models.DbFileDetails, error)
+	FindAll(userId uuid.UUID) (response []*models.DbFileDetails, err error)
 }
 
-type Job struct{}
+type File struct{}
 
-func NewJobDalRequest() (IJob, error) {
-	return &Job{}, nil
+func NewFileDalRequest() (IFile, error) {
+	return &File{}, nil
 }
 
-func (j *Job) Create(value *models.DBJobDetails) error {
+func (f *File) Create(value *models.DbFileDetails) error {
 	dbConn, err := external.GetDbConn()
 	if err != nil {
 		return err
@@ -38,7 +39,7 @@ func (j *Job) Create(value *models.DBJobDetails) error {
 	return nil
 }
 
-func (j *Job) FindBy(conditions *models.DBJobDetails) (*models.DBJobDetails, error) {
+func (f *File) FindBy(conditions *models.DbFileDetails) (*models.DbFileDetails, error) {
 	dbConn, err := external.GetDbConn()
 	if err != nil {
 		return nil, err
@@ -48,7 +49,7 @@ func (j *Job) FindBy(conditions *models.DBJobDetails) (*models.DBJobDetails, err
 		return nil, transaction.Error
 	}
 	defer transaction.Rollback()
-	var resp *models.DBJobDetails
+	var resp *models.DbFileDetails
 	ferr := transaction.Find(&resp, &conditions)
 	if ferr.Error != nil {
 		log.Println("the error while finding the job:", ferr.Error)
@@ -57,21 +58,21 @@ func (j *Job) FindBy(conditions *models.DBJobDetails) (*models.DBJobDetails, err
 	return resp, nil
 }
 
-func (j *Job) UpdateStatus(id uuid.UUID, status string) error {
+func (f *File) FindAll(userId uuid.UUID) (response []*models.DbFileDetails, err error) {
 	dbConn, err := external.GetDbConn()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	transaction := dbConn.Begin()
 	if transaction.Error != nil {
-		return transaction.Error
+		return nil, transaction.Error
 	}
 	defer transaction.Rollback()
-	update := transaction.Model(models.DBJobDetails{}).Where("task_id = ?", id).Update("status", status)
-	if update.Error != nil {
-		log.Println("error whhile ")
-		return err
+	fileDetails := transaction.Find(&response, &models.DbFileDetails{
+		UserId: userId,
+	})
+	if fileDetails.Error != nil {
+		return nil, fileDetails.Error
 	}
-	transaction.Commit()
-	return nil
+	return response, nil
 }

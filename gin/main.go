@@ -49,5 +49,5 @@ func main() {
 		ctx.JSON(200, gin.H{"Message":"GIN WORKING SUCCESSFULLY"})
 	})
 	r.GET("/job/:jobId/status", getJobStatusHandler)
-	r.Run(":8080")
+	r.Run(":8000")
 }
